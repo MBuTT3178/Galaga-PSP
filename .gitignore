@@ -1,0 +1,5 @@
+# PSP build artifacts
+*.o
+*.elf
+*.prx
+PARAM.SFO
