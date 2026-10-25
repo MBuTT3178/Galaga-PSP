@@ -47,9 +47,8 @@ A faithful, pixel-perfect 1-player arcade recreation of Namco's 1981 classic **G
 |---|---|---|
 | **D-Pad Left / Right** | Left / Right Joystick | Steers the Fighter across the bottom playfield |
 | **Analog Nub** | Analog Joystick | Smooth left/right ship navigation |
-| **Cross $\mathbf{[X]}$** | Fire Button | Launches missiles (Max 2 for Single, 4 for Dual) |
-| **Select** | Coin Insert | Inserts arcade credit (`CREDIT +1`) |
-| **Start** | 1P Start | Starts game when credits $\ge 1$ |
+| **Cross $\mathbf{[X]}$** | Fire / Quick Start | Launches missiles (Max 2 for Single, 4 for Dual); Starts game from Title |
+| **Start** | 1P Start | Starts game immediately (Free Play mode) |
 | **Home Button** | PSP Exit | Cleanly soft-exits back to the PSP XMB |
 
 ---

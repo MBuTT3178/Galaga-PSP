@@ -19,29 +19,8 @@
 #include "enemy_ai.hpp"
 #include "bezel.hpp"
 
-/* ─── PSP KERNEL BOILERPLATE ─────────────────────────────────────────── */
+/* ─── PSP RUNTIME STATE ──────────────────────────────────────────────── */
 static int g_running = 1;
-
-static int exit_callback(int arg1, int arg2, void *common) {
-    (void)arg1; (void)arg2; (void)common;
-    g_running = 0;
-    return 0;
-}
-
-static int callback_thread(SceSize args, void *argp) {
-    (void)args; (void)argp;
-    int cbid = sceKernelCreateCallback("Exit Callback", exit_callback, NULL);
-    sceKernelRegisterExitCallback(cbid);
-    sceKernelSleepThreadCB();
-    return 0;
-}
-
-static void setup_psp_callbacks() {
-    int thid = sceKernelCreateThread("update_thread", callback_thread, 0x11, 0xFA0, 0, 0);
-    if (thid >= 0) {
-        sceKernelStartThread(thid, 0, 0);
-    }
-}
 
 /* ─── GAME CONSTANTS & STRUCTURES ────────────────────────────────────── */
 #define MAX_MISSILES 4
@@ -110,8 +89,7 @@ static void read_inputs(InputState &in) {
     // Buttons
     in.fire = (s_pad_curr.Buttons & PSP_CTRL_CROSS) != 0;
     in.fire_pressed = (pressed & PSP_CTRL_CROSS) != 0;
-    in.coin_pressed = (pressed & PSP_CTRL_SELECT) != 0;
-    in.start_pressed = (pressed & PSP_CTRL_START) != 0;
+    in.start_pressed = (pressed & (PSP_CTRL_START | PSP_CTRL_CROSS)) != 0;
 }
 
 /* ─── HIGH SCORE PERSISTENCE ─────────────────────────────────────────── */
@@ -140,7 +118,6 @@ static void save_high_score(int hs) {
 /* ─── MAIN APP CLASS ─────────────────────────────────────────────────── */
 class GalagaApp {
 public:
-    SpriteBank sprites;
     Starfield starfield;
     SoundSystem sound;
     ArcadeBezel bezel;
@@ -154,7 +131,6 @@ public:
     int high_score;
     int stage;
     int lives;
-    int credits;
     int shots_fired;
     int hits_landed;
 
@@ -187,8 +163,7 @@ public:
     EnemyBullet bullets[MAX_ENEMY_BULLETS];
     Explosion explosions[MAX_EXPLOSIONS];
 
-    void init(SDL_Renderer *ren) {
-        sprites.init(ren);
+    void init() {
         starfield.init();
         sound.init();
         g_paths.init();
@@ -200,7 +175,6 @@ public:
         high_score = load_high_score();
         stage = 1;
         lives = 3;
-        credits = 0;
         shots_fired = 0;
         hits_landed = 0;
         active_captured_ship_id = -1;
@@ -227,8 +201,6 @@ public:
     }
 
     void start_game() {
-        if (credits <= 0) return;
-        credits--;
         score = 0;
         stage = 1;
         lives = 3;
@@ -456,19 +428,11 @@ public:
         // Universal Starfield update
         starfield.update(dt);
 
-        // Coin insert
-        if (in.coin_pressed) {
-            credits++;
-            sound.play(SND_COIN);
-        }
-
         // State Machine
         switch (state) {
             case GSTATE_TITLE:
                 if (in.start_pressed) {
-                    if (credits > 0) {
-                        start_game();
-                    }
+                    start_game();
                 }
                 break;
 
@@ -906,21 +870,19 @@ public:
         for (int i = 0; i < MAX_ENEMIES; i++) {
             if (!grid.enemies[i].active) continue;
             Enemy &e = grid.enemies[i];
+            int sx = PLAY_X + (int)e.x;
+            int sy = PLAY_Y + (int)e.y;
 
-            SDL_Texture *tex = nullptr;
-            if (e.type == TYPE_ZAKO) tex = sprites.zako[e.anim_frame];
-            else if (e.type == TYPE_GOEI) tex = sprites.goei[e.anim_frame];
-            else if (e.type == TYPE_BOSS) tex = (e.hp == 2) ? sprites.boss_green : sprites.boss_blue;
-            else if (e.type == TYPE_CAPTURED_SHIP) tex = sprites.captured_fighter;
-            else if (e.type == TYPE_TRANSFORM) tex = sprites.transform_alien;
-
-            if (tex) {
-                SDL_Rect dst = {PLAY_X + (int)e.x, PLAY_Y + (int)e.y, 16, 16};
-                if (e.angle != 0.0f) {
-                    SDL_RenderCopyEx(ren, tex, nullptr, &dst, e.angle, nullptr, SDL_FLIP_NONE);
-                } else {
-                    SDL_RenderCopy(ren, tex, nullptr, &dst);
-                }
+            if (e.type == TYPE_ZAKO) {
+                draw_sprite_16x16(ren, sx, sy, (e.anim_frame == 0) ? SPR_ZAKO_0 : SPR_ZAKO_1, e.angle);
+            } else if (e.type == TYPE_GOEI) {
+                draw_sprite_16x16(ren, sx, sy, (e.anim_frame == 0) ? SPR_GOEI_0 : SPR_GOEI_1, e.angle);
+            } else if (e.type == TYPE_BOSS) {
+                draw_sprite_16x16(ren, sx, sy, (e.hp == 2) ? SPR_BOSS_GREEN : SPR_BOSS_BLUE, e.angle);
+            } else if (e.type == TYPE_CAPTURED_SHIP) {
+                draw_sprite_16x16(ren, sx, sy, SPR_CAPTURED_FIGHTER, e.angle);
+            } else if (e.type == TYPE_TRANSFORM) {
+                draw_sprite_16x16(ren, sx, sy, SPR_TRANSFORM_ALIEN, e.angle);
             }
         }
 
@@ -951,14 +913,15 @@ public:
         if (state != GSTATE_PLAYER_DYING && state != GSTATE_GAME_OVER) {
             bool draw_ship = (invulnerable_timer <= 0.0f) || (((int)(invulnerable_timer * 14.0f)) % 2 == 0);
             if (draw_ship) {
-                SDL_Texture *ptex = is_dual ? sprites.dual_fighter : sprites.fighter;
-                int pw = is_dual ? 32 : 16;
-                SDL_Rect dst = {PLAY_X + (int)player_x, PLAY_Y + (int)player_y, pw, 16};
+                int sx = PLAY_X + (int)player_x;
+                int sy = PLAY_Y + (int)player_y;
 
                 if (state == GSTATE_SHIP_CAPTURING) {
-                    SDL_RenderCopyEx(ren, ptex, nullptr, &dst, capture_angle, nullptr, SDL_FLIP_NONE);
+                    draw_sprite_16x16(ren, sx, sy, SPR_FIGHTER, capture_angle);
+                } else if (is_dual) {
+                    draw_dual_fighter(ren, sx, sy);
                 } else {
-                    SDL_RenderCopy(ren, ptex, nullptr, &dst);
+                    draw_sprite_16x16(ren, sx, sy, SPR_FIGHTER, 0.0f);
                 }
             }
         }
@@ -966,11 +929,9 @@ public:
         // 7. Draw Explosions
         for (int i = 0; i < MAX_EXPLOSIONS; i++) {
             if (explosions[i].active && explosions[i].frame < 4) {
-                SDL_Texture *etex = sprites.exp[explosions[i].frame];
-                int esize = explosions[i].is_player ? 24 : 16;
-                SDL_Rect edst = {PLAY_X + (int)explosions[i].x - (esize - 16) / 2,
-                                PLAY_Y + (int)explosions[i].y - (esize - 16) / 2, esize, esize};
-                SDL_RenderCopy(ren, etex, nullptr, &edst);
+                int sx = PLAY_X + (int)explosions[i].x;
+                int sy = PLAY_Y + (int)explosions[i].y;
+                draw_explosion(ren, sx, sy, explosions[i].frame, explosions[i].is_player);
             }
         }
 
@@ -980,15 +941,11 @@ public:
             draw_text(ren, PLAY_X + 26, 68, "GALAGA", C_YELLOW, 2);
 
             draw_text(ren, PLAY_X + 44, 110, "1 PLAYER ONLY", C_CYAN, 1);
-            if (((int)(SDL_GetTicks() / 500)) % 2 == 0) {
-                if (credits > 0) {
-                    draw_text(ren, PLAY_X + 32, 140, "PUSH START BUTTON", C_GREEN, 1);
-                } else {
-                    draw_text(ren, PLAY_X + 48, 140, "INSERT COIN", C_RED, 1);
-                }
+            if (((int)(SDL_GetTicks() / 450)) % 2 == 0) {
+                draw_text(ren, PLAY_X + 32, 140, "PUSH START BUTTON", C_GREEN, 1);
             }
-            draw_text(ren, PLAY_X + 34, 175, "SELECT: ADD COIN", C_WHITE, 1);
-            draw_text(ren, PLAY_X + 36, 190, "[X]   : FIRE", C_WHITE, 1);
+            draw_text(ren, PLAY_X + 44, 165, "OR PRESS [X]", C_YELLOW, 1);
+            draw_text(ren, PLAY_X + 40, 190, "[X]   : FIRE", C_WHITE, 1);
             draw_text(ren, PLAY_X + 20, 220, "(C) 1981 NAMCO LTD.", C_BLUE, 1);
         }
         else if (state == GSTATE_STAGE_START) {
@@ -1022,25 +979,27 @@ public:
 
         // 9. Side Cabinet Bezels (Left & Right)
         bezel.render_left(ren);
-        bezel.render_right(ren, score, high_score, stage, lives, credits, shots_fired, hits_landed);
+        bezel.render_right(ren, score, high_score, stage, lives, shots_fired, hits_landed);
     }
 };
 
 /* ─── PROGRAM ENTRY POINT ────────────────────────────────────────────── */
 int main(int argc, char *argv[]) {
     (void)argc; (void)argv;
-    setup_psp_callbacks();
+    scePowerSetClockFrequency(333, 333, 166);
+    sceCtrlSetSamplingCycle(0);
+    sceCtrlSetSamplingMode(PSP_CTRL_MODE_ANALOG);
 
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_JOYSTICK) < 0) {
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) < 0) {
         sceKernelExitGame();
         return 1;
     }
 
     SDL_Window *window = SDL_CreateWindow(
         "GalagaPSP",
-        SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+        SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
         SCR_W, SCR_H,
-        SDL_WINDOW_SHOWN
+        0
     );
     if (!window) {
         SDL_Quit();
@@ -1059,11 +1018,8 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    sceCtrlSetSamplingCycle(0);
-    sceCtrlSetSamplingMode(PSP_CTRL_MODE_ANALOG);
-
     GalagaApp app;
-    app.init(renderer);
+    app.init();
 
     InputState in;
     memset(&in, 0, sizeof(in));
@@ -1097,7 +1053,6 @@ int main(int argc, char *argv[]) {
     }
 
     app.sound.shutdown();
-    app.sprites.destroy();
 
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);

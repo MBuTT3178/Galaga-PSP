@@ -399,126 +399,92 @@ static const uint8_t SPR_EXP_3[16][16] = {
     {0,2,0,0,0,0,0,0,0,0,0,0,0,0,2,0}
 };
 
-/* ─── SPRITE TEXTURE CREATION HELPER ─────────────────────────────────── */
-inline SDL_Texture* create_texture_from_matrix(SDL_Renderer *ren, const uint8_t matrix[16][16], int scale = 1) {
-    int w = 16 * scale;
-    int h = 16 * scale;
-    SDL_Surface *surf = SDL_CreateRGBSurfaceWithFormat(0, w, h, 32, SDL_PIXELFORMAT_RGBA32);
-    if (!surf) return nullptr;
-
-    const RgbColor palette[8] = {
-        C_TRANS,   // 0
-        C_WHITE,   // 1
-        C_RED,     // 2
-        C_BLUE,    // 3
-        C_CYAN,    // 4
-        C_YELLOW,  // 5
-        C_GREEN,   // 6
-        C_ORANGE   // 7
-    };
-
-    uint32_t *pixels = (uint32_t*)surf->pixels;
-    for (int y = 0; y < 16; y++) {
-        for (int x = 0; x < 16; x++) {
-            uint8_t cidx = matrix[y][x];
-            RgbColor col = palette[cidx % 8];
-            uint32_t pval = SDL_MapRGBA(surf->format, col.r, col.g, col.b, col.a);
-
-            for (int dy = 0; dy < scale; dy++) {
-                for (int dx = 0; dx < scale; dx++) {
-                    pixels[(y * scale + dy) * w + (x * scale + dx)] = pval;
-                }
-            }
-        }
-    }
-
-    SDL_Texture *tex = SDL_CreateTextureFromSurface(ren, surf);
-    SDL_FreeSurface(surf);
-    return tex;
-}
-
-/* ─── DUAL FIGHTER TEXTURE BUILDER ───────────────────────────────────── */
-inline SDL_Texture* create_dual_fighter_texture(SDL_Renderer *ren, int scale = 1) {
-    int w = 32 * scale;
-    int h = 16 * scale;
-    SDL_Surface *surf = SDL_CreateRGBSurfaceWithFormat(0, w, h, 32, SDL_PIXELFORMAT_RGBA32);
-    if (!surf) return nullptr;
-
-    const RgbColor palette[8] = {
-        C_TRANS, C_WHITE, C_RED, C_BLUE, C_CYAN, C_YELLOW, C_GREEN, C_ORANGE
-    };
-
-    uint32_t *pixels = (uint32_t*)surf->pixels;
-    // Left ship at x=0..15, Right ship at x=16..31
-    for (int ship = 0; ship < 2; ship++) {
-        int xoff = ship * 16;
-        for (int y = 0; y < 16; y++) {
-            for (int x = 0; x < 16; x++) {
-                uint8_t cidx = SPR_FIGHTER[y][x];
-                RgbColor col = palette[cidx % 8];
-                uint32_t pval = SDL_MapRGBA(surf->format, col.r, col.g, col.b, col.a);
-
-                for (int dy = 0; dy < scale; dy++) {
-                    for (int dx = 0; dx < scale; dx++) {
-                        int px = (xoff + x) * scale + dx;
-                        int py = y * scale + dy;
-                        pixels[py * w + px] = pval;
-                    }
-                }
-            }
-        }
-    }
-
-    SDL_Texture *tex = SDL_CreateTextureFromSurface(ren, surf);
-    SDL_FreeSurface(surf);
-    return tex;
-}
-
-/* ─── CACHED TEXTURE BANK ────────────────────────────────────────────── */
-struct SpriteBank {
-    SDL_Texture *fighter;
-    SDL_Texture *dual_fighter;
-    SDL_Texture *captured_fighter;
-    SDL_Texture *boss_green;
-    SDL_Texture *boss_blue;
-    SDL_Texture *goei[2];
-    SDL_Texture *zako[2];
-    SDL_Texture *transform_alien;
-    SDL_Texture *exp[4];
-
-    void init(SDL_Renderer *ren) {
-        fighter = create_texture_from_matrix(ren, SPR_FIGHTER);
-        dual_fighter = create_dual_fighter_texture(ren);
-        captured_fighter = create_texture_from_matrix(ren, SPR_CAPTURED_FIGHTER);
-        boss_green = create_texture_from_matrix(ren, SPR_BOSS_GREEN);
-        boss_blue = create_texture_from_matrix(ren, SPR_BOSS_BLUE);
-        goei[0] = create_texture_from_matrix(ren, SPR_GOEI_0);
-        goei[1] = create_texture_from_matrix(ren, SPR_GOEI_1);
-        zako[0] = create_texture_from_matrix(ren, SPR_ZAKO_0);
-        zako[1] = create_texture_from_matrix(ren, SPR_ZAKO_1);
-        transform_alien = create_texture_from_matrix(ren, SPR_TRANSFORM_ALIEN);
-        exp[0] = create_texture_from_matrix(ren, SPR_EXP_0);
-        exp[1] = create_texture_from_matrix(ren, SPR_EXP_1);
-        exp[2] = create_texture_from_matrix(ren, SPR_EXP_2);
-        exp[3] = create_texture_from_matrix(ren, SPR_EXP_3);
-    }
-
-    void destroy() {
-        if (fighter) SDL_DestroyTexture(fighter);
-        if (dual_fighter) SDL_DestroyTexture(dual_fighter);
-        if (captured_fighter) SDL_DestroyTexture(captured_fighter);
-        if (boss_green) SDL_DestroyTexture(boss_green);
-        if (boss_blue) SDL_DestroyTexture(boss_blue);
-        if (goei[0]) SDL_DestroyTexture(goei[0]);
-        if (goei[1]) SDL_DestroyTexture(goei[1]);
-        if (zako[0]) SDL_DestroyTexture(zako[0]);
-        if (zako[1]) SDL_DestroyTexture(zako[1]);
-        if (transform_alien) SDL_DestroyTexture(transform_alien);
-        for (int i = 0; i < 4; i++) {
-            if (exp[i]) SDL_DestroyTexture(exp[i]);
-        }
-    }
+/* ─── DIRECT HARDWARE-ACCELERATED SPRITE RASTERIZERS ────────────────── */
+static const RgbColor SPR_PALETTE[8] = {
+    C_TRANS,   // 0
+    C_WHITE,   // 1
+    C_RED,     // 2
+    C_BLUE,    // 3
+    C_CYAN,    // 4
+    C_YELLOW,  // 5
+    C_GREEN,   // 6
+    C_ORANGE   // 7
 };
+
+inline void draw_sprite_16x16(SDL_Renderer *ren, int screen_x, int screen_y, const uint8_t matrix[16][16], float angle_deg = 0.0f) {
+    if (angle_deg == 0.0f) {
+        for (int r = 0; r < 16; r++) {
+            int c = 0;
+            while (c < 16) {
+                uint8_t cidx = matrix[r][c];
+                if (cidx == 0) {
+                    c++;
+                    continue;
+                }
+                int run_len = 1;
+                while (c + run_len < 16 && matrix[r][c + run_len] == cidx) {
+                    run_len++;
+                }
+                const RgbColor &col = SPR_PALETTE[cidx % 8];
+                SDL_SetRenderDrawColor(ren, col.r, col.g, col.b, 255);
+                if (run_len == 1) {
+                    SDL_RenderDrawPoint(ren, screen_x + c, screen_y + r);
+                } else {
+                    SDL_Rect rc = {screen_x + c, screen_y + r, run_len, 1};
+                    SDL_RenderFillRect(ren, &rc);
+                }
+                c += run_len;
+            }
+        }
+    } else {
+        // Rotated 16x16 sprite centered at (screen_x + 7.5, screen_y + 7.5)
+        float rad = angle_deg * (3.14159265f / 180.0f);
+        float cos_a = cosf(rad);
+        float sin_a = sinf(rad);
+        float cx = (float)screen_x + 7.5f;
+        float cy = (float)screen_y + 7.5f;
+
+        for (int r = 0; r < 16; r++) {
+            float dy = (float)r - 7.5f;
+            for (int c = 0; c < 16; c++) {
+                uint8_t cidx = matrix[r][c];
+                if (cidx == 0) continue;
+                float dx = (float)c - 7.5f;
+                int rx = (int)(cx + dx * cos_a - dy * sin_a + 0.5f);
+                int ry = (int)(cy + dx * sin_a + dy * cos_a + 0.5f);
+                const RgbColor &col = SPR_PALETTE[cidx % 8];
+                SDL_SetRenderDrawColor(ren, col.r, col.g, col.b, 255);
+                SDL_RenderDrawPoint(ren, rx, ry);
+            }
+        }
+    }
+}
+
+inline void draw_dual_fighter(SDL_Renderer *ren, int screen_x, int screen_y) {
+    draw_sprite_16x16(ren, screen_x, screen_y, SPR_FIGHTER, 0.0f);
+    draw_sprite_16x16(ren, screen_x + 16, screen_y, SPR_FIGHTER, 0.0f);
+}
+
+inline void draw_explosion(SDL_Renderer *ren, int screen_x, int screen_y, int frame, bool is_player = false) {
+    if (frame < 0 || frame > 3) return;
+    const uint8_t (*matrices[4])[16] = {SPR_EXP_0, SPR_EXP_1, SPR_EXP_2, SPR_EXP_3};
+    if (is_player) {
+        // Double-scale player explosion
+        const uint8_t (*mat)[16] = matrices[frame];
+        for (int r = 0; r < 16; r++) {
+            for (int c = 0; c < 16; c++) {
+                uint8_t cidx = mat[r][c];
+                if (cidx == 0) continue;
+                const RgbColor &col = SPR_PALETTE[cidx % 8];
+                SDL_SetRenderDrawColor(ren, col.r, col.g, col.b, 255);
+                SDL_Rect rc = {screen_x - 4 + c * 2, screen_y - 4 + r * 2, 2, 2};
+                SDL_RenderFillRect(ren, &rc);
+            }
+        }
+    } else {
+        draw_sprite_16x16(ren, screen_x, screen_y, matrices[frame], 0.0f);
+    }
+}
 
 /* ─── STARFIELD ENGINE ───────────────────────────────────────────────── */
 #define MAX_STARS 72

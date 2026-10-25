@@ -72,12 +72,12 @@ public:
         draw_text(ren, 14, 183, "CONTROLS", C_CYAN, 1);
         draw_text(ren, 14, 196, "D-PAD: MOVE", C_WHITE, 1);
         draw_text(ren, 14, 209, "[X]  : FIRE", C_YELLOW, 1);
-        draw_text(ren, 14, 222, "SEL  : COIN", C_WHITE, 1);
-        draw_text(ren, 14, 235, "START: 1P PLAY", C_GREEN, 1);
+        draw_text(ren, 14, 222, "START: PLAY", C_GREEN, 1);
+        draw_text(ren, 14, 235, "AUTO-FIRE ON", C_CYAN, 1);
         draw_text(ren, 14, 248, "PSP HOME: EXIT", C_DIM, 1);
     }
 
-    void render_right(SDL_Renderer *ren, int score, int high_score, int stage, int lives, int credits, int shots, int hits) {
+    void render_right(SDL_Renderer *ren, int score, int high_score, int stage, int lives, int shots, int hits) {
         // Cabinet right panel background
         SDL_Rect rc_bg = {BEZEL_R_X, 0, BEZEL_R_W, SCR_H};
         SDL_SetRenderDrawColor(ren, 12, 14, 26, 255);
@@ -108,7 +108,7 @@ public:
         snprintf(buf, sizeof(buf), "%6d", high_score);
         draw_text(ren, BEZEL_R_X + 14, 50, buf, C_WHITE, 1);
 
-        // Stage & Credits Card
+        // Stage & Stats Card
         SDL_Rect rc_stats = {BEZEL_R_X + 10, 68, BEZEL_R_W - 18, 90};
         SDL_SetRenderDrawColor(ren, 20, 26, 46, 255);
         SDL_RenderFillRect(ren, &rc_stats);
@@ -118,8 +118,7 @@ public:
         snprintf(buf, sizeof(buf), "STAGE %d", stage);
         draw_text(ren, BEZEL_R_X + 16, 73, buf, C_CYAN, 1);
 
-        snprintf(buf, sizeof(buf), "CREDIT %d", credits);
-        draw_text(ren, BEZEL_R_X + 16, 86, buf, (credits > 0) ? C_GREEN : C_RED, 1);
+        draw_text(ren, BEZEL_R_X + 16, 86, "FREE PLAY", C_GREEN, 1);
 
         // Accuracy stats
         draw_text(ren, BEZEL_R_X + 16, 104, "ACCURACY", C_YELLOW, 1);
