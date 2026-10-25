@@ -288,6 +288,7 @@ public:
     float grid_base_y;
     float col_spread;
     int alive_count;
+    bool tractor_beam_active;
 
     void init() {
         breath_timer = 0.0f;
@@ -295,6 +296,7 @@ public:
         grid_base_y = 38.0f;
         col_spread = 15.0f;
         alive_count = 0;
+        tractor_beam_active = false;
         for (int i = 0; i < MAX_ENEMIES; i++) {
             enemies[i].reset();
             enemies[i].id = i;
@@ -307,13 +309,15 @@ public:
         return Vec2(x, y);
     }
 
-    void update(float dt) {
+    void update(float dt, float target_player_x = 102.0f) {
         breath_timer += dt;
         // Oscillating grid breathing
         grid_base_x = (PLAY_W * 0.5f) + sinf(breath_timer * 1.6f) * 11.0f;
         col_spread = 15.0f + sinf(breath_timer * 2.2f) * 1.2f;
 
         alive_count = 0;
+        tractor_beam_active = false;
+
         for (int i = 0; i < MAX_ENEMIES; i++) {
             if (!enemies[i].active) continue;
             alive_count++;
@@ -328,10 +332,28 @@ public:
 
             // State updates
             if (e.state == ESTATE_IN_FORMATION) {
-                Vec2 target = get_slot_pos(e.form_row, e.form_col);
-                e.x = target.x;
-                e.y = target.y;
-                e.angle = 0.0f; // Facing down in formation
+                // If this is a captured ship attached to a diving boss, lock beside the diving boss
+                bool following_boss = false;
+                if (e.type == TYPE_CAPTURED_SHIP) {
+                    for (int b = 0; b < MAX_ENEMIES; b++) {
+                        if (enemies[b].active && enemies[b].type == TYPE_BOSS && enemies[b].captured_ship_enemy_id == e.id) {
+                            if (enemies[b].state == ESTATE_DIVING || enemies[b].state == ESTATE_RETURNING) {
+                                e.x = enemies[b].x + 16.0f;
+                                e.y = enemies[b].y;
+                                e.angle = enemies[b].angle;
+                                following_boss = true;
+                            }
+                            break;
+                        }
+                    }
+                }
+
+                if (!following_boss) {
+                    Vec2 target = get_slot_pos(e.form_row, e.form_col);
+                    e.x = target.x;
+                    e.y = target.y;
+                    e.angle = 0.0f; // Facing down in formation
+                }
             }
             else if (e.state == ESTATE_ENTERING || e.state == ESTATE_CHALLENGE) {
                 e.path_time += dt;
@@ -391,6 +413,7 @@ public:
                 } else {
                     // Holding position and projecting tractor beam
                     e.angle = 0.0f;
+                    tractor_beam_active = true;
                     e.tractor_timer += dt;
                     if (e.tractor_length < 96.0f) {
                         e.tractor_length += 80.0f * dt;
@@ -403,8 +426,9 @@ public:
                 }
             }
             else if (e.state == ESTATE_RESCUED) {
-                // Rescued ship descending to dock with player
+                // Rescued ship descending to dock with player, smoothly aligning horizontally
                 e.y += 90.0f * dt;
+                e.x += (target_player_x - e.x) * (4.0f * dt);
                 e.angle += 360.0f * dt;
             }
         }

@@ -117,6 +117,7 @@ static void read_inputs(InputState &in) {
 /* ─── HIGH SCORE PERSISTENCE ─────────────────────────────────────────── */
 static int load_high_score() {
     FILE *f = fopen("ms0:/PSP/SAVEDATA/GALAGA0000/hiscore.dat", "rb");
+    if (!f) f = fopen("hiscore.dat", "rb");
     if (!f) return 20000; // Default classic Galaga factory high score
     int hs = 20000;
     fread(&hs, sizeof(int), 1, f);
@@ -125,9 +126,11 @@ static int load_high_score() {
 }
 
 static void save_high_score(int hs) {
+    sceIoMkdir("ms0:/PSP", 0777);
     sceIoMkdir("ms0:/PSP/SAVEDATA", 0777);
     sceIoMkdir("ms0:/PSP/SAVEDATA/GALAGA0000", 0777);
     FILE *f = fopen("ms0:/PSP/SAVEDATA/GALAGA0000/hiscore.dat", "wb");
+    if (!f) f = fopen("hiscore.dat", "wb");
     if (f) {
         fwrite(&hs, sizeof(int), 1, f);
         fclose(f);
@@ -163,6 +166,8 @@ public:
     float capture_target_y;
     int capturing_boss_id;
     int active_captured_ship_id;
+    float invulnerable_timer;
+    float fire_cooldown;
 
     // Challenging Stage Tracking
     int challenge_wave;
@@ -198,6 +203,7 @@ public:
         credits = 0;
         shots_fired = 0;
         hits_landed = 0;
+        active_captured_ship_id = -1;
 
         reset_player();
         clear_projectiles();
@@ -210,7 +216,8 @@ public:
         ship_w = 16.0f;
         capture_angle = 0.0f;
         capturing_boss_id = -1;
-        active_captured_ship_id = -1;
+        invulnerable_timer = 2.0f;
+        fire_cooldown = 0.0f;
     }
 
     void clear_projectiles() {
@@ -227,6 +234,7 @@ public:
         lives = 3;
         shots_fired = 0;
         hits_landed = 0;
+        active_captured_ship_id = -1;
         reset_player();
         start_stage(1);
     }
@@ -234,6 +242,7 @@ public:
     void start_stage(int stg) {
         stage = stg;
         clear_projectiles();
+        sound.stop_tractor();
         grid.init();
 
         state = GSTATE_STAGE_START;
@@ -472,6 +481,7 @@ public:
                         state = GSTATE_CHALLENGING_STAGE;
                         challenge_wave = 0;
                         challenge_wave_timer = 0.0f;
+                        spawn_challenge_wave(0);
                     } else {
                         state = GSTATE_SWARM_IN;
                         swarm_step = 0;
@@ -482,7 +492,10 @@ public:
                 break;
 
             case GSTATE_SWARM_IN:
-                grid.update(dt);
+                grid.update(dt, player_x + (is_dual ? 16.0f : 8.0f));
+                if (!grid.tractor_beam_active && sound.tractor_voice_idx >= 0) sound.stop_tractor();
+                if (invulnerable_timer > 0.0f) invulnerable_timer -= dt;
+
                 swarm_step_timer += dt;
                 if (swarm_step < 4 && swarm_step_timer >= 1.6f) {
                     swarm_step++;
@@ -498,7 +511,10 @@ public:
                 break;
 
             case GSTATE_PLAYING:
-                grid.update(dt);
+                grid.update(dt, player_x + (is_dual ? 16.0f : 8.0f));
+                if (!grid.tractor_beam_active && sound.tractor_voice_idx >= 0) sound.stop_tractor();
+                if (invulnerable_timer > 0.0f) invulnerable_timer -= dt;
+
                 update_player(dt, in);
                 update_projectiles(dt);
                 check_missile_hits();
@@ -518,7 +534,9 @@ public:
                 break;
 
             case GSTATE_CHALLENGING_STAGE:
-                grid.update(dt);
+                grid.update(dt, player_x + (is_dual ? 16.0f : 8.0f));
+                if (invulnerable_timer > 0.0f) invulnerable_timer -= dt;
+
                 update_player(dt, in);
                 update_projectiles(dt);
                 check_missile_hits();
@@ -633,8 +651,10 @@ public:
         if (player_x < 2.0f) player_x = 2.0f;
         if (player_x > max_x) player_x = max_x;
 
-        if (in.fire_pressed) {
+        if (fire_cooldown > 0.0f) fire_cooldown -= dt;
+        if (in.fire_pressed || (in.fire && fire_cooldown <= 0.0f)) {
             fire_missile();
+            fire_cooldown = 0.16f;
         }
     }
 
@@ -756,13 +776,19 @@ public:
 
                         // DUAL FIGHTER RESCUE LOGIC
                         if (en.type == TYPE_BOSS && en.has_captured_ship) {
-                            // Freed the captured fighter!
                             sound.stop_tractor();
                             int cap_id = en.captured_ship_enemy_id;
                             if (cap_id >= 0 && cap_id < MAX_ENEMIES && grid.enemies[cap_id].active) {
                                 Enemy &cap = grid.enemies[cap_id];
-                                cap.state = ESTATE_RESCUED;
-                                sound.play(SND_RESCUE_DUAL);
+                                if (en.state == ESTATE_DIVING || en.state == ESTATE_RETURNING) {
+                                    // Freed in flight -> docks into Dual Fighter!
+                                    cap.state = ESTATE_RESCUED;
+                                    sound.play(SND_RESCUE_DUAL);
+                                } else {
+                                    // Boss destroyed in formation -> captive ship attacks as rogue diver!
+                                    cap.type = TYPE_GOEI;
+                                    cap.start_dive(player_x + 8.0f, false);
+                                }
                             }
                         }
 
@@ -814,12 +840,13 @@ public:
                     active_captured_ship_id = -1;
                     is_dual = true;
                     ship_w = 32.0f;
+                    player_x = e.x;
                     sound.play(SND_RESCUE_DUAL);
                 }
             }
 
             // 3. Enemy body collision with player
-            if (e.state != ESTATE_RESCUED) {
+            if (invulnerable_timer <= 0.0f && e.state != ESTATE_RESCUED) {
                 if (player_x < e.x + 14.0f && player_x + pw > e.x + 2.0f &&
                     player_y < e.y + 14.0f && player_y + ph > e.y + 2.0f) {
                     player_hit();
@@ -831,13 +858,15 @@ public:
         }
 
         // 4. Enemy bullets hitting player
-        for (int i = 0; i < MAX_ENEMY_BULLETS; i++) {
-            if (!bullets[i].active) continue;
-            if (bullets[i].x >= player_x + 2.0f && bullets[i].x <= player_x + pw - 2.0f &&
-                bullets[i].y >= player_y && bullets[i].y <= player_y + ph) {
-                bullets[i].active = false;
-                player_hit();
-                return;
+        if (invulnerable_timer <= 0.0f) {
+            for (int i = 0; i < MAX_ENEMY_BULLETS; i++) {
+                if (!bullets[i].active) continue;
+                if (bullets[i].x >= player_x + 2.0f && bullets[i].x <= player_x + pw - 2.0f &&
+                    bullets[i].y >= player_y && bullets[i].y <= player_y + ph) {
+                    bullets[i].active = false;
+                    player_hit();
+                    return;
+                }
             }
         }
     }
@@ -847,6 +876,7 @@ public:
             // Only one half of dual fighter is destroyed!
             is_dual = false;
             ship_w = 16.0f;
+            invulnerable_timer = 1.8f;
             spawn_explosion(player_x + 8.0f, player_y, true);
             sound.play(SND_EXPLODE_PLAYER);
         } else {
@@ -919,14 +949,17 @@ public:
 
         // 6. Draw Player Ship
         if (state != GSTATE_PLAYER_DYING && state != GSTATE_GAME_OVER) {
-            SDL_Texture *ptex = is_dual ? sprites.dual_fighter : sprites.fighter;
-            int pw = is_dual ? 32 : 16;
-            SDL_Rect dst = {PLAY_X + (int)player_x, PLAY_Y + (int)player_y, pw, 16};
+            bool draw_ship = (invulnerable_timer <= 0.0f) || (((int)(invulnerable_timer * 14.0f)) % 2 == 0);
+            if (draw_ship) {
+                SDL_Texture *ptex = is_dual ? sprites.dual_fighter : sprites.fighter;
+                int pw = is_dual ? 32 : 16;
+                SDL_Rect dst = {PLAY_X + (int)player_x, PLAY_Y + (int)player_y, pw, 16};
 
-            if (state == GSTATE_SHIP_CAPTURING) {
-                SDL_RenderCopyEx(ren, ptex, nullptr, &dst, capture_angle, nullptr, SDL_FLIP_NONE);
-            } else {
-                SDL_RenderCopy(ren, ptex, nullptr, &dst);
+                if (state == GSTATE_SHIP_CAPTURING) {
+                    SDL_RenderCopyEx(ren, ptex, nullptr, &dst, capture_angle, nullptr, SDL_FLIP_NONE);
+                } else {
+                    SDL_RenderCopy(ren, ptex, nullptr, &dst);
+                }
             }
         }
 
