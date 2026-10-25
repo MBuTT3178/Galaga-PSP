@@ -8,11 +8,10 @@ CFLAGS = -O2 -G0 -Wall
 CXXFLAGS = -O2 -G0 -Wall -std=c++11 -fno-exceptions -fno-rtti
 ASFLAGS = $(CFLAGS)
 
-INCDIR = $(PSPDEV)/psp/include/SDL2
-
+INCDIR =
 LIBDIR =
 LDFLAGS =
-LIBS = -lSDL2main -lSDL2 -lGL -lpspvram -lpspaudio -lpspvfpu -lpspgu -lpspge -lpsphprm -lpspdisplay -lpspctrl -lpsppower -lpspdebug -lstdc++ -lm
+LIBS = -lpspdisplay -lpspctrl -lpsppower -lpspaudio -lpspaudiolib -lstdc++ -lm
 
 EXTRA_TARGETS = EBOOT.PBP
 PSP_EBOOT_TITLE = Galaga (Arcade 1981) PSP

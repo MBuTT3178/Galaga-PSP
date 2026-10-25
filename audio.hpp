@@ -1,11 +1,10 @@
 #ifndef AUDIO_HPP
 #define AUDIO_HPP
 
-#include <SDL.h>
+#include <pspaudiolib.h>
 #include <cstdlib>
 #include <cstdint>
 
-#define AUDIO_SAMPLE_RATE 22050
 #define MAX_AUDIO_VOICES 4
 
 struct SynthVoice {
@@ -18,19 +17,20 @@ struct SynthVoice {
 
 static SynthVoice g_voices[MAX_AUDIO_VOICES];
 
-static void galaga_audio_callback(void *userdata, Uint8 *stream, int len) {
-    (void)userdata;
-    Sint16 *buf = (Sint16*)stream;
-    int samples = len / 2;
+static void galaga_audio_callback(void *buf, unsigned int reqn, void *pdata) {
+    (void)pdata;
+    short *out = (short *)buf;
 
-    for (int i = 0; i < samples; i++) {
-        Sint32 mixed = 0;
+    for (unsigned int i = 0; i < reqn; i++) {
+        int mixed = 0;
         for (int v = 0; v < MAX_AUDIO_VOICES; v++) {
             if (!g_voices[v].active) continue;
             if (g_voices[v].type == 0) {
-                int period = (int)(22050.0f / g_voices[v].freq);
+                float f = g_voices[v].freq;
+                if (f < 20.0f) f = 20.0f;
+                int period = (int)(44100.0f / f);
                 if (period <= 0) period = 1;
-                Sint16 val = ((g_voices[v].phase % period) < (period / 2)) ? 4000 : -4000;
+                short val = ((g_voices[v].phase % period) < (period / 2)) ? 4000 : -4000;
                 mixed += val;
                 g_voices[v].phase++;
             } else {
@@ -43,7 +43,8 @@ static void galaga_audio_callback(void *userdata, Uint8 *stream, int len) {
         }
         if (mixed > 32767) mixed = 32767;
         if (mixed < -32768) mixed = -32768;
-        buf[i] = (Sint16)mixed;
+        out[i * 2]     = (short)mixed;
+        out[i * 2 + 1] = (short)mixed;
     }
 }
 
@@ -67,25 +68,19 @@ public:
     void init() {
         for (int i = 0; i < MAX_AUDIO_VOICES; i++) {
             g_voices[i].active = 0;
+            g_voices[i].freq = 440.0f;
             g_voices[i].phase = 0;
             g_voices[i].samples_left = 0;
+            g_voices[i].type = 0;
         }
 
-        SDL_AudioSpec want, have;
-        SDL_zero(want);
-        want.freq = AUDIO_SAMPLE_RATE;
-        want.format = AUDIO_S16SYS;
-        want.channels = 1;
-        want.samples = 512;
-        want.callback = galaga_audio_callback;
-
-        if (SDL_OpenAudio(&want, &have) == 0) {
-            SDL_PauseAudio(0);
-        }
+        pspAudioInit();
+        pspAudioSetVolume(0, 0x8000, 0x8000);
+        pspAudioSetChannelCallback(0, galaga_audio_callback, NULL);
     }
 
     void shutdown() {
-        SDL_CloseAudio();
+        pspAudioEnd();
     }
 
     void play(SoundId id) {
@@ -131,11 +126,11 @@ public:
                 return;
         }
 
-        // Lock-free voice allocation (find inactive or overwrite first)
+        // Voice allocation: find inactive voice or recycle voice 0
         for (int v = 0; v < MAX_AUDIO_VOICES; v++) {
             if (!g_voices[v].active) {
                 g_voices[v].freq = freq;
-                g_voices[v].samples_left = (int)(22050.0f * ms / 1000.0f);
+                g_voices[v].samples_left = (int)(44100.0f * ms / 1000.0f);
                 g_voices[v].phase = 0;
                 g_voices[v].type = type;
                 g_voices[v].active = 1;
@@ -143,7 +138,7 @@ public:
             }
         }
         g_voices[0].freq = freq;
-        g_voices[0].samples_left = (int)(22050.0f * ms / 1000.0f);
+        g_voices[0].samples_left = (int)(44100.0f * ms / 1000.0f);
         g_voices[0].phase = 0;
         g_voices[0].type = type;
         g_voices[0].active = 1;

@@ -1,17 +1,20 @@
 /*
  * Galaga (Arcade 1981) — Sony PSP Port
- * Native C++11 / PSPSDK / SDL2 Port
+ * Native C++11 / PSPSDK Hardware Direct Port
  * 1-Player Vertical Portrait Arcade Action
+ * Optimized for Sony PSP Hardware & PPSSPP
  */
 
-#include <SDL.h>
 #include <pspkernel.h>
-#include <pspdebug.h>
+#include <pspdisplay.h>
 #include <pspctrl.h>
 #include <psppower.h>
+#include <pspaudiolib.h>
+#include <pspiofilemgr.h>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cmath>
 #include <vector>
 
 #include "sprites.hpp"
@@ -19,10 +22,52 @@
 #include "enemy_ai.hpp"
 #include "bezel.hpp"
 
-/* ─── PSP RUNTIME STATE ──────────────────────────────────────────────── */
+PSP_MODULE_INFO("GalagaPSP", 0, 1, 0);
+PSP_MAIN_THREAD_ATTR(THREAD_ATTR_USER | THREAD_ATTR_VFPU);
+PSP_HEAP_SIZE_KB(4096);
+
+/* ─── PSP HARDWARE DISPLAY & DOUBLE BUFFERING ───────────────────────────── */
+uint32_t *fb_draw = (uint32_t *)VRAM_BASE1;
+static void *fb_disp = (void *)VRAM_BASE0;
+
+static void init_display(void) {
+    sceDisplaySetMode(0, SCR_W, SCR_H);
+    fb_draw = (uint32_t *)VRAM_BASE1;
+    fb_disp = (void *)VRAM_BASE0;
+    sceDisplaySetFrameBuf(fb_disp, BUF_W, PSP_DISPLAY_PIXEL_FORMAT_8888, PSP_DISPLAY_SETBUF_IMMEDIATE);
+}
+
+static void flip_buffers(void) {
+    sceDisplaySetFrameBuf((void *)fb_draw, BUF_W, PSP_DISPLAY_PIXEL_FORMAT_8888, PSP_DISPLAY_SETBUF_NEXTFRAME);
+    sceDisplayWaitVblankStart();
+    fb_disp = (void *)fb_draw;
+    fb_draw = (fb_draw == (uint32_t *)VRAM_BASE0) ? (uint32_t *)VRAM_BASE1 : (uint32_t *)VRAM_BASE0;
+}
+
+/* ─── PSP RUNTIME EXIT CALLBACK HANDLERS ────────────────────────────────── */
 static int g_running = 1;
 
-/* ─── GAME CONSTANTS & STRUCTURES ────────────────────────────────────── */
+static int exit_cb(int arg1, int arg2, void *common) {
+    (void)arg1; (void)arg2; (void)common;
+    g_running = 0;
+    sceKernelExitGame();
+    return 0;
+}
+
+static int cb_thread(SceSize args, void *argp) {
+    (void)args; (void)argp;
+    int cbid = sceKernelCreateCallback("exit_cb", exit_cb, NULL);
+    sceKernelRegisterExitCallback(cbid);
+    sceKernelSleepThreadCB();
+    return 0;
+}
+
+static void setup_callbacks(void) {
+    int thid = sceKernelCreateThread("cb_thread", cb_thread, 0x11, 0xFA0, 0, 0);
+    if (thid >= 0) sceKernelStartThread(thid, 0, 0);
+}
+
+/* ─── GAME CONSTANTS & STRUCTURES ───────────────────────────────────────── */
 #define MAX_MISSILES 4
 #define MAX_ENEMY_BULLETS 8
 #define MAX_EXPLOSIONS 8
@@ -59,12 +104,11 @@ enum GameState {
     GSTATE_GAME_OVER
 };
 
-/* ─── INPUT SYSTEM ───────────────────────────────────────────────────── */
+/* ─── INPUT SYSTEM ──────────────────────────────────────────────────────── */
 struct InputState {
     bool left, right;
     bool fire;
     bool fire_pressed;
-    bool coin_pressed;
     bool start_pressed;
 };
 
@@ -92,11 +136,11 @@ static void read_inputs(InputState &in) {
     in.start_pressed = (pressed & (PSP_CTRL_START | PSP_CTRL_CROSS)) != 0;
 }
 
-/* ─── HIGH SCORE PERSISTENCE ─────────────────────────────────────────── */
+/* ─── HIGH SCORE PERSISTENCE ────────────────────────────────────────────── */
 static int load_high_score() {
     FILE *f = fopen("ms0:/PSP/SAVEDATA/GALAGA0000/hiscore.dat", "rb");
     if (!f) f = fopen("hiscore.dat", "rb");
-    if (!f) return 20000; // Default classic Galaga factory high score
+    if (!f) return 20000;
     int hs = 20000;
     fread(&hs, sizeof(int), 1, f);
     fclose(f);
@@ -115,7 +159,7 @@ static void save_high_score(int hs) {
     }
 }
 
-/* ─── MAIN APP CLASS ─────────────────────────────────────────────────── */
+/* ─── MAIN APP CLASS ────────────────────────────────────────────────────── */
 class GalagaApp {
 public:
     Starfield starfield;
@@ -222,7 +266,6 @@ public:
         starfield.warp_speed = true;
         sound.play(SND_STAGE_INTRO);
 
-        // Check if challenging stage (3, 7, 11, 15...)
         bool is_challenge = (stage >= 3 && (stage - 3) % 4 == 0);
         if (is_challenge) {
             challenge_wave = 0;
@@ -251,7 +294,6 @@ public:
 
     void fire_missile() {
         if (is_dual) {
-            // Dual Fighter fires pair of missiles (left and right)
             int free1 = -1, free2 = -1;
             for (int i = 0; i < MAX_MISSILES; i++) {
                 if (!missiles[i].active) {
@@ -274,7 +316,6 @@ public:
                 sound.play(SND_FIRE);
             }
         } else {
-            // Single Fighter: max 2 missiles on screen
             int active_count = 0;
             int free_idx = -1;
             for (int i = 0; i < MAX_MISSILES; i++) {
@@ -309,9 +350,7 @@ public:
     }
 
     void spawn_swarm_wave(int wave_idx) {
-        // Populates authentic waves of 8 enemies per swarm loop
         if (wave_idx == 0) {
-            // Wave 1: 4 Bosses (Row 0, Cols 3,4,5,6) + 4 Goei (Row 1, Cols 3,4,5,6) from Top-Left
             for (int i = 0; i < 4; i++) {
                 int eid = i;
                 Enemy &e = grid.enemies[eid];
@@ -338,7 +377,6 @@ public:
             }
         }
         else if (wave_idx == 1) {
-            // Wave 2: 8 Goei (Row 1 & 2) from Top-Right
             for (int i = 0; i < 8; i++) {
                 int eid = 8 + i;
                 Enemy &e = grid.enemies[eid];
@@ -353,7 +391,6 @@ public:
             }
         }
         else if (wave_idx == 2) {
-            // Wave 3: 8 Zakos (Row 3) from Bottom-Left
             for (int i = 0; i < 8; i++) {
                 int eid = 16 + i;
                 Enemy &e = grid.enemies[eid];
@@ -368,7 +405,6 @@ public:
             }
         }
         else if (wave_idx == 3) {
-            // Wave 4: 8 Zakos (Row 4) from Bottom-Right
             for (int i = 0; i < 8; i++) {
                 int eid = 24 + i;
                 Enemy &e = grid.enemies[eid];
@@ -383,7 +419,6 @@ public:
             }
         }
         else if (wave_idx == 4) {
-            // Wave 5: Edge corner enemies (Row 3 & 4 outer cols 0 and 9, and Row 2 outer cols)
             int extras[6][2] = {{3,0}, {3,9}, {4,0}, {4,9}, {2,7}, {2,8}};
             for (int i = 0; i < 6; i++) {
                 int eid = 32 + i;
@@ -423,12 +458,10 @@ public:
         }
     }
 
-    /* ─── UPDATE LOOP ────────────────────────────────────────────────── */
+    /* ─── UPDATE LOOP ───────────────────────────────────────────────────── */
     void update(float dt, const InputState &in) {
-        // Universal Starfield update
         starfield.update(dt);
 
-        // State Machine
         switch (state) {
             case GSTATE_TITLE:
                 if (in.start_pressed) {
@@ -484,14 +517,12 @@ public:
                 check_missile_hits();
                 check_player_collisions();
 
-                // Periodic Dive Bomb Attacks
                 dive_attack_timer -= dt;
                 if (dive_attack_timer <= 0.0f) {
                     dive_attack_timer = 2.0f + (rand() % 20) * 0.1f;
                     trigger_random_dive();
                 }
 
-                // Check for stage clear
                 if (grid.alive_count == 0) {
                     start_stage(stage + 1);
                 }
@@ -512,7 +543,6 @@ public:
                     spawn_challenge_wave(challenge_wave);
                 }
 
-                // End of challenging stage
                 if (challenge_wave >= 4 && challenge_wave_timer >= 3.8f && grid.alive_count == 0) {
                     state = GSTATE_CHALLENGE_RESULTS;
                     state_timer = 0.0f;
@@ -543,16 +573,12 @@ public:
 
                 if (capturing_boss_id >= 0) {
                     Enemy &boss = grid.enemies[capturing_boss_id];
-                    // Pull horizontally towards boss center
                     player_x += (boss.x - player_x) * (6.0f * dt);
 
                     if (player_y <= boss.y + 16.0f) {
-                        // Docked under Boss Galaga!
                         sound.stop_tractor();
                         sound.play(SND_CAPTURED);
                         boss.has_captured_ship = true;
-
-                        // Spawn captive ship enemy attached to boss
                         spawn_captured_ship_enemy(capturing_boss_id);
 
                         lives--;
@@ -593,7 +619,6 @@ public:
                 break;
         }
 
-        // Explosions animation
         for (int i = 0; i < MAX_EXPLOSIONS; i++) {
             if (explosions[i].active) {
                 explosions[i].timer += dt;
@@ -610,7 +635,6 @@ public:
         if (in.left) player_x -= speed * dt;
         if (in.right) player_x += speed * dt;
 
-        // Clamp to playfield boundary
         float max_x = PLAY_W - (is_dual ? 34.0f : 18.0f);
         if (player_x < 2.0f) player_x = 2.0f;
         if (player_x > max_x) player_x = max_x;
@@ -623,7 +647,6 @@ public:
     }
 
     void update_projectiles(float dt) {
-        // Missiles
         for (int i = 0; i < MAX_MISSILES; i++) {
             if (missiles[i].active) {
                 missiles[i].y += missiles[i].vy * dt;
@@ -633,7 +656,6 @@ public:
             }
         }
 
-        // Bullets
         for (int i = 0; i < MAX_ENEMY_BULLETS; i++) {
             if (bullets[i].active) {
                 bullets[i].x += bullets[i].vx * dt;
@@ -646,7 +668,6 @@ public:
     }
 
     void trigger_random_dive() {
-        // Find alive enemies in formation
         std::vector<int> candidates;
         for (int i = 0; i < MAX_ENEMIES; i++) {
             if (grid.enemies[i].active && grid.enemies[i].state == ESTATE_IN_FORMATION) {
@@ -658,7 +679,6 @@ public:
         int pick = candidates[rand() % candidates.size()];
         Enemy &e = grid.enemies[pick];
 
-        // Boss Galaga Tractor Beam check (only if player is single, not dying, and no active capture)
         bool want_tractor = false;
         if (e.type == TYPE_BOSS && !is_dual && active_captured_ship_id < 0 && state == GSTATE_PLAYING) {
             if (rand() % 100 < 35) {
@@ -672,7 +692,6 @@ public:
         if (want_tractor) {
             sound.play(SND_TRACTOR_LOOP);
         } else {
-            // Drop bullet on dive
             spawn_enemy_bullet(e.x + 8.0f, e.y + 12.0f, player_x + 8.0f);
         }
     }
@@ -684,7 +703,7 @@ public:
                 cap.active = true;
                 cap.type = TYPE_CAPTURED_SHIP;
                 cap.state = ESTATE_IN_FORMATION;
-                cap.form_row = 0; // Sits above Boss in top row
+                cap.form_row = 0;
                 cap.form_col = grid.enemies[boss_id].form_col;
                 cap.hp = 1;
                 active_captured_ship_id = i;
@@ -708,7 +727,6 @@ public:
                 float ex = en.x;
                 float ey = en.y;
 
-                // 14x14 bounding box
                 if (mx >= ex && mx <= ex + 16.0f && my >= ey && my <= ey + 16.0f) {
                     missiles[m].active = false;
                     hits_landed++;
@@ -719,7 +737,6 @@ public:
                         spawn_explosion(ex, ey);
                         sound.play(SND_EXPLODE_ENEMY);
 
-                        // Score handling
                         int pts = 100;
                         if (en.type == TYPE_ZAKO) pts = (en.state == ESTATE_IN_FORMATION) ? 50 : 100;
                         else if (en.type == TYPE_GOEI) pts = (en.state == ESTATE_IN_FORMATION) ? 80 : 160;
@@ -733,23 +750,19 @@ public:
                             save_high_score(high_score);
                         }
 
-                        // Challenging stage hit tally
                         if (state == GSTATE_CHALLENGING_STAGE) {
                             challenge_hits++;
                         }
 
-                        // DUAL FIGHTER RESCUE LOGIC
                         if (en.type == TYPE_BOSS && en.has_captured_ship) {
                             sound.stop_tractor();
                             int cap_id = en.captured_ship_enemy_id;
                             if (cap_id >= 0 && cap_id < MAX_ENEMIES && grid.enemies[cap_id].active) {
                                 Enemy &cap = grid.enemies[cap_id];
                                 if (en.state == ESTATE_DIVING || en.state == ESTATE_RETURNING) {
-                                    // Freed in flight -> docks into Dual Fighter!
                                     cap.state = ESTATE_RESCUED;
                                     sound.play(SND_RESCUE_DUAL);
                                 } else {
-                                    // Boss destroyed in formation -> captive ship attacks as rogue diver!
                                     cap.type = TYPE_GOEI;
                                     cap.start_dive(player_x + 8.0f, false);
                                 }
@@ -760,7 +773,6 @@ public:
                             active_captured_ship_id = -1;
                         }
                     } else {
-                        // Boss took 1 hit (turns blue)
                         sound.play(SND_BOSS_HIT);
                     }
                     break;
@@ -770,25 +782,25 @@ public:
     }
 
     void check_player_collisions() {
-        if (state != GSTATE_PLAYING) return;
+        if (state != GSTATE_PLAYING && state != GSTATE_SWARM_IN) return;
 
         float pw = is_dual ? 32.0f : 16.0f;
         float ph = 16.0f;
 
-        // 1. Check Tractor Beam capture
         for (int i = 0; i < MAX_ENEMIES; i++) {
             if (!grid.enemies[i].active || grid.enemies[i].path_time < 0.0f) continue;
             Enemy &e = grid.enemies[i];
 
-            if (e.state == ESTATE_TRACTOR_BEAM && e.tractor_length > 30.0f) {
-                // Check if player is directly within tractor beam cone
+            // 1. Tractor Beam capture check
+            if (e.state == ESTATE_TRACTOR_BEAM && e.tractor_length > 20.0f && !is_dual && active_captured_ship_id < 0) {
+                float beam_top_y = e.y + 16.0f;
+                float beam_bot_y = beam_top_y + e.tractor_length;
                 float beam_center_x = e.x + 8.0f;
-                float half_w = 4.0f + (e.tractor_length / 96.0f) * 38.0f;
+                float beam_half_w = 4.0f + (e.tractor_length / 150.0f) * 38.0f;
 
-                if (player_x + pw * 0.5f >= beam_center_x - half_w &&
-                    player_x + pw * 0.5f <= beam_center_x + half_w &&
-                    player_y <= e.y + e.tractor_length + 10.0f) {
-                    // Captured!
+                if (player_y >= beam_top_y && player_y <= beam_bot_y &&
+                    player_x + 8.0f >= beam_center_x - beam_half_w &&
+                    player_x + 8.0f <= beam_center_x + beam_half_w) {
                     state = GSTATE_SHIP_CAPTURING;
                     capturing_boss_id = i;
                     capture_angle = 0.0f;
@@ -796,10 +808,9 @@ public:
                 }
             }
 
-            // 2. Check Rescued ship docking with player
+            // 2. Rescued ship docking
             if (e.state == ESTATE_RESCUED) {
                 if (e.y >= player_y - 8.0f) {
-                    // Successful Docking -> DUAL FIGHTER UNLOCKED!
                     e.active = false;
                     active_captured_ship_id = -1;
                     is_dual = true;
@@ -809,7 +820,7 @@ public:
                 }
             }
 
-            // 3. Enemy body collision with player
+            // 3. Enemy body collision
             if (invulnerable_timer <= 0.0f && e.state != ESTATE_RESCUED) {
                 if (player_x < e.x + 14.0f && player_x + pw > e.x + 2.0f &&
                     player_y < e.y + 14.0f && player_y + ph > e.y + 2.0f) {
@@ -821,7 +832,7 @@ public:
             }
         }
 
-        // 4. Enemy bullets hitting player
+        // 4. Enemy bullets
         if (invulnerable_timer <= 0.0f) {
             for (int i = 0; i < MAX_ENEMY_BULLETS; i++) {
                 if (!bullets[i].active) continue;
@@ -837,14 +848,12 @@ public:
 
     void player_hit() {
         if (is_dual) {
-            // Only one half of dual fighter is destroyed!
             is_dual = false;
             ship_w = 16.0f;
             invulnerable_timer = 1.8f;
             spawn_explosion(player_x + 8.0f, player_y, true);
             sound.play(SND_EXPLODE_PLAYER);
         } else {
-            // Full player death
             spawn_explosion(player_x, player_y, true);
             sound.play(SND_EXPLODE_PLAYER);
             lives--;
@@ -853,20 +862,20 @@ public:
         }
     }
 
-    /* ─── RENDER LOOP ────────────────────────────────────────────────── */
-    void render(SDL_Renderer *ren) {
-        // 1. Draw Starfield in playable area
-        starfield.render(ren);
+    /* ─── RENDER LOOP ───────────────────────────────────────────────────── */
+    void render() {
+        // 1. Starfield
+        starfield.render();
 
-        // 2. Draw Active Tractor Beams
+        // 2. Active Tractor Beams
         for (int i = 0; i < MAX_ENEMIES; i++) {
             if (grid.enemies[i].active && grid.enemies[i].state == ESTATE_TRACTOR_BEAM) {
-                render_tractor_beam(ren, grid.enemies[i].x + 8.0f, grid.enemies[i].y + 16.0f,
+                render_tractor_beam(grid.enemies[i].x + 8.0f, grid.enemies[i].y + 16.0f,
                                     grid.enemies[i].tractor_length, (int)(grid.breath_timer * 15.0f));
             }
         }
 
-        // 3. Draw Enemies
+        // 3. Enemies
         for (int i = 0; i < MAX_ENEMIES; i++) {
             if (!grid.enemies[i].active || grid.enemies[i].path_time < 0.0f) continue;
             Enemy &e = grid.enemies[i];
@@ -874,42 +883,35 @@ public:
             int sy = PLAY_Y + (int)e.y;
 
             if (e.type == TYPE_ZAKO) {
-                draw_sprite_16x16(ren, sx, sy, (e.anim_frame == 0) ? SPR_ZAKO_0 : SPR_ZAKO_1, e.angle);
+                draw_sprite_16x16(sx, sy, (e.anim_frame == 0) ? SPR_ZAKO_0 : SPR_ZAKO_1, e.angle);
             } else if (e.type == TYPE_GOEI) {
-                draw_sprite_16x16(ren, sx, sy, (e.anim_frame == 0) ? SPR_GOEI_0 : SPR_GOEI_1, e.angle);
+                draw_sprite_16x16(sx, sy, (e.anim_frame == 0) ? SPR_GOEI_0 : SPR_GOEI_1, e.angle);
             } else if (e.type == TYPE_BOSS) {
-                draw_sprite_16x16(ren, sx, sy, (e.hp == 2) ? SPR_BOSS_GREEN : SPR_BOSS_BLUE, e.angle);
+                draw_sprite_16x16(sx, sy, (e.hp == 2) ? SPR_BOSS_GREEN : SPR_BOSS_BLUE, e.angle);
             } else if (e.type == TYPE_CAPTURED_SHIP) {
-                draw_sprite_16x16(ren, sx, sy, SPR_CAPTURED_FIGHTER, e.angle);
+                draw_sprite_16x16(sx, sy, SPR_CAPTURED_FIGHTER, e.angle);
             } else if (e.type == TYPE_TRANSFORM) {
-                draw_sprite_16x16(ren, sx, sy, SPR_TRANSFORM_ALIEN, e.angle);
+                draw_sprite_16x16(sx, sy, SPR_TRANSFORM_ALIEN, e.angle);
             }
         }
 
-        // 4. Draw Player Missiles
-        SDL_SetRenderDrawColor(ren, 255, 240, 64, 255);
+        // 4. Player Missiles
         for (int i = 0; i < MAX_MISSILES; i++) {
             if (missiles[i].active) {
-                SDL_Rect r1 = {PLAY_X + (int)missiles[i].x, PLAY_Y + (int)missiles[i].y, 2, 6};
-                SDL_RenderFillRect(ren, &r1);
-                SDL_SetRenderDrawColor(ren, 240, 32, 32, 255);
-                SDL_RenderDrawPoint(ren, PLAY_X + (int)missiles[i].x, PLAY_Y + (int)missiles[i].y + 6);
-                SDL_SetRenderDrawColor(ren, 255, 240, 64, 255);
+                draw_fill_rect(PLAY_X + (int)missiles[i].x, PLAY_Y + (int)missiles[i].y, 2, 6, RGB(255, 240, 64));
+                draw_pixel(PLAY_X + (int)missiles[i].x, PLAY_Y + (int)missiles[i].y + 6, RGB(240, 32, 32));
             }
         }
 
-        // 5. Draw Enemy Bullets
+        // 5. Enemy Bullets
         for (int i = 0; i < MAX_ENEMY_BULLETS; i++) {
             if (bullets[i].active) {
-                SDL_SetRenderDrawColor(ren, 240, 40, 40, 255);
-                SDL_Rect rb = {PLAY_X + (int)bullets[i].x - 1, PLAY_Y + (int)bullets[i].y - 2, 3, 5};
-                SDL_RenderFillRect(ren, &rb);
-                SDL_SetRenderDrawColor(ren, 255, 220, 60, 255);
-                SDL_RenderDrawPoint(ren, PLAY_X + (int)bullets[i].x, PLAY_Y + (int)bullets[i].y);
+                draw_fill_rect(PLAY_X + (int)bullets[i].x - 1, PLAY_Y + (int)bullets[i].y - 2, 3, 5, RGB(240, 40, 40));
+                draw_pixel(PLAY_X + (int)bullets[i].x, PLAY_Y + (int)bullets[i].y, RGB(255, 220, 60));
             }
         }
 
-        // 6. Draw Player Ship
+        // 6. Player Ship
         if (state != GSTATE_PLAYER_DYING && state != GSTATE_GAME_OVER) {
             bool draw_ship = (invulnerable_timer <= 0.0f) || (((int)(invulnerable_timer * 14.0f)) % 2 == 0);
             if (draw_ship) {
@@ -917,106 +919,82 @@ public:
                 int sy = PLAY_Y + (int)player_y;
 
                 if (state == GSTATE_SHIP_CAPTURING) {
-                    draw_sprite_16x16(ren, sx, sy, SPR_FIGHTER, capture_angle);
+                    draw_sprite_16x16(sx, sy, SPR_FIGHTER, capture_angle);
                 } else if (is_dual) {
-                    draw_dual_fighter(ren, sx, sy);
+                    draw_dual_fighter(sx, sy);
                 } else {
-                    draw_sprite_16x16(ren, sx, sy, SPR_FIGHTER, 0.0f);
+                    draw_sprite_16x16(sx, sy, SPR_FIGHTER, 0.0f);
                 }
             }
         }
 
-        // 7. Draw Explosions
+        // 7. Explosions
         for (int i = 0; i < MAX_EXPLOSIONS; i++) {
             if (explosions[i].active && explosions[i].frame < 4) {
                 int sx = PLAY_X + (int)explosions[i].x;
                 int sy = PLAY_Y + (int)explosions[i].y;
-                draw_explosion(ren, sx, sy, explosions[i].frame, explosions[i].is_player);
+                draw_explosion(sx, sy, explosions[i].frame, explosions[i].is_player);
             }
         }
 
-        // 8. In-Game State Banners
+        // 8. Banners
         if (state == GSTATE_TITLE) {
-            draw_text(ren, PLAY_X + 28, 70, "GALAGA", C_RED, 2);
-            draw_text(ren, PLAY_X + 26, 68, "GALAGA", C_YELLOW, 2);
+            draw_text(PLAY_X + 28, 70, "GALAGA", C_RED, 2);
+            draw_text(PLAY_X + 26, 68, "GALAGA", C_YELLOW, 2);
 
-            draw_text(ren, PLAY_X + 44, 110, "1 PLAYER ONLY", C_CYAN, 1);
-            if (((int)(SDL_GetTicks() / 450)) % 2 == 0) {
-                draw_text(ren, PLAY_X + 32, 140, "PUSH START BUTTON", C_GREEN, 1);
+            draw_text(PLAY_X + 44, 110, "1 PLAYER ONLY", C_CYAN, 1);
+            if (((int)(sceKernelGetSystemTimeLow() / 450000)) % 2 == 0) {
+                draw_text(PLAY_X + 32, 140, "PUSH START BUTTON", C_GREEN, 1);
             }
-            draw_text(ren, PLAY_X + 44, 165, "OR PRESS [X]", C_YELLOW, 1);
-            draw_text(ren, PLAY_X + 40, 190, "[X]   : FIRE", C_WHITE, 1);
-            draw_text(ren, PLAY_X + 20, 220, "(C) 1981 NAMCO LTD.", C_BLUE, 1);
+            draw_text(PLAY_X + 44, 165, "OR PRESS [X]", C_YELLOW, 1);
+            draw_text(PLAY_X + 40, 190, "[X]   : FIRE", C_WHITE, 1);
+            draw_text(PLAY_X + 20, 220, "(C) 1981 NAMCO LTD.", C_BLUE, 1);
         }
         else if (state == GSTATE_STAGE_START) {
             char buf[32];
             bool is_challenge = (stage >= 3 && (stage - 3) % 4 == 0);
             if (is_challenge) {
-                draw_text(ren, PLAY_X + 24, 120, "CHALLENGING STAGE", C_CYAN, 1);
+                draw_text(PLAY_X + 24, 120, "CHALLENGING STAGE", C_CYAN, 1);
             } else {
                 snprintf(buf, sizeof(buf), "STAGE %d", stage);
-                draw_text(ren, PLAY_X + 68, 120, buf, C_CYAN, 1);
+                draw_text(PLAY_X + 68, 120, buf, C_CYAN, 1);
             }
-            draw_text(ren, PLAY_X + 74, 140, "START!", C_RED, 1);
+            draw_text(PLAY_X + 74, 140, "START!", C_RED, 1);
         }
         else if (state == GSTATE_CHALLENGE_RESULTS) {
-            draw_text(ren, PLAY_X + 26, 90, "CHALLENGING STAGE", C_CYAN, 1);
+            draw_text(PLAY_X + 26, 90, "CHALLENGING STAGE", C_CYAN, 1);
             char buf[32];
             snprintf(buf, sizeof(buf), "NUMBER OF HITS %2d", challenge_hits);
-            draw_text(ren, PLAY_X + 28, 120, buf, C_YELLOW, 1);
+            draw_text(PLAY_X + 28, 120, buf, C_YELLOW, 1);
 
             if (challenge_hits >= 40) {
-                draw_text(ren, PLAY_X + 48, 145, "PERFECT!", C_GREEN, 1);
-                draw_text(ren, PLAY_X + 24, 160, "SPECIAL 10000 PTS", C_CYAN, 1);
+                draw_text(PLAY_X + 48, 145, "PERFECT!", C_GREEN, 1);
+                draw_text(PLAY_X + 24, 160, "SPECIAL 10000 PTS", C_CYAN, 1);
             } else {
                 snprintf(buf, sizeof(buf), "BONUS %5d PTS", challenge_hits * 100);
-                draw_text(ren, PLAY_X + 38, 145, buf, C_WHITE, 1);
+                draw_text(PLAY_X + 38, 145, buf, C_WHITE, 1);
             }
         }
         else if (state == GSTATE_GAME_OVER) {
-            draw_text(ren, PLAY_X + 56, 120, "GAME OVER", C_RED, 1);
+            draw_text(PLAY_X + 56, 120, "GAME OVER", C_RED, 1);
         }
 
         // 9. Side Cabinet Bezels (Left & Right)
-        bezel.render_left(ren);
-        bezel.render_right(ren, score, high_score, stage, lives, shots_fired, hits_landed);
+        bezel.render_left();
+        bezel.render_right(score, high_score, stage, lives, shots_fired, hits_landed);
     }
 };
 
-/* ─── PROGRAM ENTRY POINT ────────────────────────────────────────────── */
+/* ─── PROGRAM ENTRY POINT ───────────────────────────────────────────────── */
 int main(int argc, char *argv[]) {
     (void)argc; (void)argv;
+    setup_callbacks();
+
     scePowerSetClockFrequency(333, 333, 166);
     sceCtrlSetSamplingCycle(0);
     sceCtrlSetSamplingMode(PSP_CTRL_MODE_ANALOG);
 
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) < 0) {
-        sceKernelExitGame();
-        return 1;
-    }
-
-    SDL_Window *window = SDL_CreateWindow(
-        "GalagaPSP",
-        SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
-        SCR_W, SCR_H,
-        0
-    );
-    if (!window) {
-        SDL_Quit();
-        sceKernelExitGame();
-        return 1;
-    }
-
-    SDL_Renderer *renderer = SDL_CreateRenderer(
-        window, -1,
-        SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC
-    );
-    if (!renderer) {
-        SDL_DestroyWindow(window);
-        SDL_Quit();
-        sceKernelExitGame();
-        return 1;
-    }
+    init_display();
 
     GalagaApp app;
     app.init();
@@ -1026,38 +1004,24 @@ int main(int argc, char *argv[]) {
     memset(&s_pad_curr, 0, sizeof(s_pad_curr));
     memset(&s_pad_prev, 0, sizeof(s_pad_prev));
 
-    Uint32 last_time = SDL_GetTicks();
+    uint32_t last_time_us = sceKernelGetSystemTimeLow();
 
     while (g_running) {
-        SDL_Event e;
-        while (SDL_PollEvent(&e)) {
-            if (e.type == SDL_QUIT) {
-                g_running = 0;
-            }
-        }
-
-        Uint32 now = SDL_GetTicks();
-        float dt = (float)(now - last_time) * 0.001f;
-        if (dt > 0.05f) dt = 0.05f; // Clamp delta
-        last_time = now;
+        uint32_t now_us = sceKernelGetSystemTimeLow();
+        float dt = (float)(now_us - last_time_us) * 0.000001f;
+        if (dt < 0.0f || dt > 0.05f) dt = 0.016667f;
+        last_time_us = now_us;
 
         read_inputs(in);
         app.update(dt, in);
 
-        SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
-        SDL_RenderClear(renderer);
+        clear_screen();
+        app.render();
 
-        app.render(renderer);
-
-        SDL_RenderPresent(renderer);
+        flip_buffers();
     }
 
     app.sound.shutdown();
-
-    SDL_DestroyRenderer(renderer);
-    SDL_DestroyWindow(window);
-    SDL_Quit();
-
     sceKernelExitGame();
     return 0;
 }
