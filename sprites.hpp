@@ -116,11 +116,15 @@ inline void draw_text(SDL_Renderer *ren, int x, int y, const char *str, const Rg
             unsigned char bits = glyph[r];
             for (int col = 0; col < 8; col++) {
                 if (bits & (0x80 >> col)) {
-                    if (scale == 1) {
-                        SDL_RenderDrawPoint(ren, x + col, y + r);
-                    } else {
-                        SDL_Rect rc = {x + col * scale, y + r * scale, scale, scale};
-                        SDL_RenderFillRect(ren, &rc);
+                    int px = x + col * scale;
+                    int py = y + r * scale;
+                    if (px >= 0 && px < SCR_W && py >= 0 && py < SCR_H) {
+                        if (scale == 1) {
+                            SDL_RenderDrawPoint(ren, px, py);
+                        } else {
+                            SDL_Rect rc = {px, py, scale, scale};
+                            SDL_RenderFillRect(ren, &rc);
+                        }
                     }
                 }
             }
@@ -414,6 +418,8 @@ static const RgbColor SPR_PALETTE[8] = {
 inline void draw_sprite_16x16(SDL_Renderer *ren, int screen_x, int screen_y, const uint8_t matrix[16][16], float angle_deg = 0.0f) {
     if (angle_deg == 0.0f) {
         for (int r = 0; r < 16; r++) {
+            int py = screen_y + r;
+            if (py < 0 || py >= SCR_H) continue;
             int c = 0;
             while (c < 16) {
                 uint8_t cidx = matrix[r][c];
@@ -425,13 +431,20 @@ inline void draw_sprite_16x16(SDL_Renderer *ren, int screen_x, int screen_y, con
                 while (c + run_len < 16 && matrix[r][c + run_len] == cidx) {
                     run_len++;
                 }
-                const RgbColor &col = SPR_PALETTE[cidx % 8];
-                SDL_SetRenderDrawColor(ren, col.r, col.g, col.b, 255);
-                if (run_len == 1) {
-                    SDL_RenderDrawPoint(ren, screen_x + c, screen_y + r);
-                } else {
-                    SDL_Rect rc = {screen_x + c, screen_y + r, run_len, 1};
-                    SDL_RenderFillRect(ren, &rc);
+                int px = screen_x + c;
+                if (px + run_len > 0 && px < SCR_W) {
+                    int draw_x = px < 0 ? 0 : px;
+                    int draw_len = (px + run_len > SCR_W) ? (SCR_W - draw_x) : (px + run_len - draw_x);
+                    if (draw_len > 0) {
+                        const RgbColor &col = SPR_PALETTE[cidx % 8];
+                        SDL_SetRenderDrawColor(ren, col.r, col.g, col.b, 255);
+                        if (draw_len == 1) {
+                            SDL_RenderDrawPoint(ren, draw_x, py);
+                        } else {
+                            SDL_Rect rc = {draw_x, py, draw_len, 1};
+                            SDL_RenderFillRect(ren, &rc);
+                        }
+                    }
                 }
                 c += run_len;
             }
@@ -452,9 +465,11 @@ inline void draw_sprite_16x16(SDL_Renderer *ren, int screen_x, int screen_y, con
                 float dx = (float)c - 7.5f;
                 int rx = (int)(cx + dx * cos_a - dy * sin_a + 0.5f);
                 int ry = (int)(cy + dx * sin_a + dy * cos_a + 0.5f);
-                const RgbColor &col = SPR_PALETTE[cidx % 8];
-                SDL_SetRenderDrawColor(ren, col.r, col.g, col.b, 255);
-                SDL_RenderDrawPoint(ren, rx, ry);
+                if (rx >= 0 && rx < SCR_W && ry >= 0 && ry < SCR_H) {
+                    const RgbColor &col = SPR_PALETTE[cidx % 8];
+                    SDL_SetRenderDrawColor(ren, col.r, col.g, col.b, 255);
+                    SDL_RenderDrawPoint(ren, rx, ry);
+                }
             }
         }
     }
@@ -478,7 +493,9 @@ inline void draw_explosion(SDL_Renderer *ren, int screen_x, int screen_y, int fr
                 const RgbColor &col = SPR_PALETTE[cidx % 8];
                 SDL_SetRenderDrawColor(ren, col.r, col.g, col.b, 255);
                 SDL_Rect rc = {screen_x - 4 + c * 2, screen_y - 4 + r * 2, 2, 2};
-                SDL_RenderFillRect(ren, &rc);
+                if (rc.x >= 0 && rc.x + rc.w <= SCR_W && rc.y >= 0 && rc.y + rc.h <= SCR_H) {
+                    SDL_RenderFillRect(ren, &rc);
+                }
             }
         }
     } else {

@@ -357,6 +357,9 @@ public:
             }
             else if (e.state == ESTATE_ENTERING || e.state == ESTATE_CHALLENGE) {
                 e.path_time += dt;
+                if (e.path_time < 0.0f) {
+                    continue;
+                }
                 float angle_deg = 0.0f;
                 Vec2 pt = e.current_path.evaluate(e.path_time, &angle_deg);
                 e.x = pt.x;

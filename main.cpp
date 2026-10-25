@@ -457,7 +457,7 @@ public:
 
             case GSTATE_SWARM_IN:
                 grid.update(dt, player_x + (is_dual ? 16.0f : 8.0f));
-                if (!grid.tractor_beam_active && sound.tractor_voice_idx >= 0) sound.stop_tractor();
+                if (!grid.tractor_beam_active) sound.stop_tractor();
                 if (invulnerable_timer > 0.0f) invulnerable_timer -= dt;
 
                 swarm_step_timer += dt;
@@ -476,7 +476,7 @@ public:
 
             case GSTATE_PLAYING:
                 grid.update(dt, player_x + (is_dual ? 16.0f : 8.0f));
-                if (!grid.tractor_beam_active && sound.tractor_voice_idx >= 0) sound.stop_tractor();
+                if (!grid.tractor_beam_active) sound.stop_tractor();
                 if (invulnerable_timer > 0.0f) invulnerable_timer -= dt;
 
                 update_player(dt, in);
@@ -702,7 +702,7 @@ public:
             float my = missiles[m].y;
 
             for (int e = 0; e < MAX_ENEMIES; e++) {
-                if (!grid.enemies[e].active) continue;
+                if (!grid.enemies[e].active || grid.enemies[e].path_time < 0.0f) continue;
 
                 Enemy &en = grid.enemies[e];
                 float ex = en.x;
@@ -777,7 +777,7 @@ public:
 
         // 1. Check Tractor Beam capture
         for (int i = 0; i < MAX_ENEMIES; i++) {
-            if (!grid.enemies[i].active) continue;
+            if (!grid.enemies[i].active || grid.enemies[i].path_time < 0.0f) continue;
             Enemy &e = grid.enemies[i];
 
             if (e.state == ESTATE_TRACTOR_BEAM && e.tractor_length > 30.0f) {
@@ -868,7 +868,7 @@ public:
 
         // 3. Draw Enemies
         for (int i = 0; i < MAX_ENEMIES; i++) {
-            if (!grid.enemies[i].active) continue;
+            if (!grid.enemies[i].active || grid.enemies[i].path_time < 0.0f) continue;
             Enemy &e = grid.enemies[i];
             int sx = PLAY_X + (int)e.x;
             int sy = PLAY_Y + (int)e.y;
